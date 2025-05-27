@@ -51,6 +51,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.math import subtract_frame_transforms
 from isaaclab.utils.math import combine_frame_transforms, compute_pose_error, quat_from_euler_xyz, quat_unique
 import os
+import numpy as np
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 object_usd_path = os.path.join(script_dir, "asset/lip_convert_rigid_sdf.usd")
@@ -81,7 +82,7 @@ class GraspSceneCfg(InteractiveSceneCfg):
     # rigid body
     object: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.6, 0.0, 0.2], rot=[1, 0, 0, 0]),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.6, 0.0, 0.2], rot=[0, 1, 0, 0]),
         spawn=sim_utils.UsdFileCfg(
             usd_path=object_usd_path,
             scale=(1.0, 1.0, 1.0),
@@ -99,18 +100,21 @@ class GraspSceneCfg(InteractiveSceneCfg):
     else:
         raise ValueError(f"Robot {args_cli.robot} is not supported. Valid: franka_panda, ur10")
 
-def state_machine(count, episode=366, move_state=200, close_state=266, open_state=361):
+def state_machine(count, episode=399, move_state=180, open_state=200, close_state=250, lift_state=399):
     if count % episode == 0:
         flag = "reset"
 
     elif count % episode <= move_state:
         flag = "move_to_target"
     
-    elif count % episode <= close_state and move_state < count % episode:
+    elif count % episode <= open_state and move_state < count % episode:
+        flag = "open_gripper"
+    
+    elif open_state < count % episode and count % episode <= close_state:
         flag = "close_gripper"
     
     elif close_state < count % episode and count % episode <= episode:
-        flag = "open_gripper"
+        flag = "lift_to_target"
     
     return flag
 
@@ -203,7 +207,8 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             joint_pos_des = joint_default_pos[:, robot_entity_cfg.joint_ids].clone()
             # reset controller
             diff_ik_controller.reset()
-            target_pose_w = generate_target_pose(object_pose_w=object.data.root_state_w, x=(-0.1, 0.1), y=(-0.1, 0.1), z=(-0.1, 0.1), roll=(-1.57, 1.57), pitch=(-1.57, 1.57), yaw=(-1.57, 1.57))
+            #np.deg2rad()
+            target_pose_w = generate_target_pose(object_pose_w=object.data.root_state_w, x=(0.22, 0.22), y=(0.0, 0.0), z=(-0.07, -0.07), roll=(0.0, 0.0), pitch=(np.deg2rad(-90), np.deg2rad(-90)), yaw=(0.0, 0.0))
 
         elif flag == "close_gripper":
             robot.set_joint_position_target(joint_pos_des, joint_ids=robot_entity_cfg.joint_ids)
@@ -219,7 +224,7 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             # print("target_pose_b", target_pose_b)
             ik_commands[:] = target_pose_w[:, :7]
             ik_commands[:, :3] -= scene.env_origins
-            print("ik_commands", ik_commands)
+            # print("ik_commands", ik_commands)
             diff_ik_controller.set_command(ik_commands)
             # obtain quantities from simulation
             jacobian = robot.root_physx_view.get_jacobians()[:, ee_jacobi_idx, :, robot_entity_cfg.joint_ids]
@@ -233,6 +238,27 @@ def run_simulator(sim: sim_utils.SimulationContext, scene: InteractiveScene):
             # compute the joint commands
             joint_pos_des = diff_ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
             robot.set_joint_position_target(joint_pos_des, joint_ids=robot_entity_cfg.joint_ids)
+
+        elif flag == "lift_to_target":
+            print("lift_target")
+            ik_commands[:] = target_pose_w[:, :7]
+            ik_commands[:, 2] += 0.16
+            ik_commands[:, :3] -= scene.env_origins
+            # print("ik_commands", ik_commands)
+            diff_ik_controller.set_command(ik_commands)
+            # obtain quantities from simulation
+            jacobian = robot.root_physx_view.get_jacobians()[:, ee_jacobi_idx, :, robot_entity_cfg.joint_ids]
+            ee_pose_w = robot.data.body_state_w[:, robot_entity_cfg.body_ids[0], 0:7]
+            root_pose_w = robot.data.root_state_w[:, 0:7]
+            joint_pos = robot.data.joint_pos[:, robot_entity_cfg.joint_ids]
+            # compute frame in root frame
+            ee_pos_b, ee_quat_b = subtract_frame_transforms(
+                root_pose_w[:, 0:3], root_pose_w[:, 3:7], ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
+            )
+            # compute the joint commands
+            joint_pos_des = diff_ik_controller.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
+            robot.set_joint_position_target(joint_pos_des, joint_ids=robot_entity_cfg.joint_ids)
+
         else:
             robot.set_joint_position_target(joint_default_pos)
 
